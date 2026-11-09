@@ -35,6 +35,7 @@
 import importlib
 import typing
 
+from rcl_interfaces.msg import SetParametersResult
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -384,6 +385,11 @@ class JoyTeleop(Node):
 
             names.append(name)
 
+        # An axis mapping's scale and offset can be changed while running, e.g.
+        # 'ros2 param set /joy_teleop human_control.axis_mappings.drive-speed.scale 2.0'.
+        # Everything else is still read once, here.
+        self.add_on_set_parameters_callback(self.set_axis_mapping_parameters)
+
         # Don't subscribe until everything has been initialized.
         qos = rclpy.qos.QoSProfile(history=rclpy.qos.QoSHistoryPolicy.KEEP_LAST,
                                    depth=1,
@@ -391,6 +397,26 @@ class JoyTeleop(Node):
                                    durability=rclpy.qos.QoSDurabilityPolicy.VOLATILE)
         self._subscription = self.create_subscription(
             sensor_msgs.msg.Joy, 'joy', self.joy_callback, qos)
+
+    def set_axis_mapping_parameters(self, params) -> SetParametersResult:
+        changes = []
+        for param in params:
+            parts = param.name.split(PARAMETER_SEPARATOR_STRING)
+            if len(parts) != 4 or parts[1] != 'axis_mappings' or \
+                    parts[3] not in ('scale', 'offset'):
+                continue
+            mapping = next((c.axis_mappings[parts[2]] for c in self.commands
+                            if c.name == parts[0] and
+                            parts[2] in getattr(c, 'axis_mappings', {})), None)
+            if mapping is None:
+                continue
+            if isinstance(param.value, bool) or not isinstance(param.value, (int, float)):
+                return SetParametersResult(successful=False,
+                                           reason='{} must be a number'.format(param.name))
+            changes.append((mapping, parts[3], float(param.value)))
+        for mapping, key, value in changes:
+            mapping[key] = value
+        return SetParametersResult(successful=True)
 
     def retrieve_config(self):
         config = {}
