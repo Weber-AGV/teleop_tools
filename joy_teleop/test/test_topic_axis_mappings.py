@@ -35,7 +35,9 @@
 import geometry_msgs.msg
 from joy_teleop_testing_common import generate_joy_test_description, TestJoyTeleop
 import pytest
+from rcl_interfaces.srv import SetParameters
 import rclpy
+from rclpy.parameter import Parameter
 
 
 @pytest.mark.rostest
@@ -119,4 +121,51 @@ class TestJoyTeleopTopicAxisMappings(TestJoyTeleop):
 
         finally:
             # Cleanup
+            self.node.destroy_subscription(twist_subscriber)
+
+    def set_scale(self, value):
+        client = self.node.create_client(SetParameters, '/joy_teleop/set_parameters')
+        try:
+            self.assertTrue(client.wait_for_service(timeout_sec=10))
+            request = SetParameters.Request()
+            request.parameters = [
+                Parameter('twist.axis_mappings.linear-x.scale', value=value).to_parameter_msg()]
+            future = client.call_async(request)
+            self.executor.spin_until_future_complete(future, timeout_sec=10)
+            return future.result().results[0].successful
+        finally:
+            self.node.destroy_client(client)
+
+    def test_scale_changes_while_running(self):
+        twists = []
+        qos = rclpy.qos.QoSProfile(history=rclpy.qos.QoSHistoryPolicy.KEEP_LAST,
+                                   depth=1,
+                                   reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
+                                   durability=rclpy.qos.QoSDurabilityPolicy.VOLATILE)
+        twist_subscriber = self.node.create_subscription(
+            geometry_msgs.msg.Twist, '/cmd_vel', twists.append, qos)
+
+        try:
+            self.publish_from_timer = False
+            self.assertTrue(self.set_scale(2.0))
+            self.assertFalse(self.set_scale('fast'))
+
+            # Drop twists sent before the change, delivered while waiting on it.
+            self.executor.spin_once(0.1)
+            twists.clear()
+            self.joy_msg.axes = [0.0, 1.0, 0.0, 1.0]
+            self.joy_msg.buttons = [0, 0, 1]
+            for i in range(0, 20):
+                self.joy_publisher.publish(self.joy_msg)
+                self.executor.spin_once(0.1)
+                if twists:
+                    break
+
+            self.assertTrue(twists, 'Timed out waiting for twist topic')
+            self.assertEqual(twists[-1].linear.x, 2.0)
+            self.assertEqual(twists[-1].angular.z, 0.5)
+
+        finally:
+            # test_twist shares this joy_teleop and expects the original scale.
+            self.set_scale(0.8)
             self.node.destroy_subscription(twist_subscriber)
